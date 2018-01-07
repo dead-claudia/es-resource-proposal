@@ -44,8 +44,8 @@ Things may look incomplet and incorrekt, and probably looks like a giant stage -
 
 - It's simple to understand and easy to explain.
 
-- It's opinionated in favor of RAII, but most JS APIs already follow that to some extent.
-    - Consider: promises, array buffers, DOM's newer APIs, Node's internal APIs, etc.
+- It's opinionated in favor of [RAII ("Resource Acquisition Is Initialization")](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization), but most JS APIs already follow that to some extent.
+    - Consider: promises, array buffers, DOM's newer APIs, Node's external APIs, etc.
 
 - It's opinionated in favor of FIFO resource management, but this is already mandated by the promise disposer pattern.
 
@@ -286,3 +286,10 @@ Things may look incomplet and incorrekt, and probably looks like a giant stage -
     ```
 
 - Note: https://esdiscuss.org/topic/resource-management-eg-try-with-resources#content-2
+
+- TODO: explain how this compares to other languages
+    - Java's `try`-with-resources
+    - C#'s `using`
+    - Python's `with`
+    - Ruby's blocks (which are used more or less exactly how the disposer pattern is used)
+    - [C++'s](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization#C++11_example)/[Rust's](https://rustbyexample.com/std_misc/file/open.html) RAII (which this was inspired from)
