@@ -288,8 +288,8 @@ Things may look incomplet and incorrekt, and probably looks like a giant stage -
 - Note: https://esdiscuss.org/topic/resource-management-eg-try-with-resources#content-2
 
 - TODO: explain how this compares to other languages
-    - Java's `try`-with-resources
-    - C#'s `using`
-    - Python's `with`
-    - Ruby's blocks (which are used more or less exactly how the disposer pattern is used)
+    - [Java's `try`-with-resources](https://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html)
+    - [C#'s `using`](https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/keywords/using-statement)
+    - [Python's `with`](http://preshing.com/20110920/the-python-with-statement-by-example/)
+    - [Ruby's blocks (which with `begin`/`ensure` are used more or less exactly how the disposer pattern is used)](http://jakegoulding.com/blog/2012/10/01/using-ruby-blocks-to-ensure-resources-are-cleaned-up/)
     - [C++'s](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization#C++11_example)/[Rust's](https://rustbyexample.com/std_misc/file/open.html) RAII (which this was inspired from)
