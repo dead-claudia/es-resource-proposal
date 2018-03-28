@@ -160,7 +160,7 @@ Things may look incomplet and incorrekt, and probably looks like a giant stage -
             }
             // Both connections closed by now
         })()
-    ```
+        ```
 
     Helpers used for promise disposer variant:
 
