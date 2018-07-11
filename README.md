@@ -1,295 +1,151 @@
 # A proposal for resource management in JS
 
-⚠️⚠️⚠️ This proposal is under construction. ⚠️⚠️⚠️
+*Initially inspired by [this ES Discuss thread](https://esdiscuss.org/topic/resource-management-eg-try-with-resources#content-2).*
 
-Things may look incomplet and incorrekt, and probably looks like a giant stage -1000 strawman. Please proceed at your own risk, as things might look completely and totally confusing to you. 😉
+JS really needs a resource management system. How often do you find yourself doing something like these?
 
-- A resource is an object with a `Symbol.close` method.
+```js
+// Get some rows from a database, using the Promise disposer pattern
+await db.connect(async connection => {
+    const rows = await connection.query("SELECT * FROM TABLE")
+    console.log(rows)
+})
 
-- `value[Symbol.close]()` - Close the resource.
-    - It *should* be reentrant as well as idempotent, but the spec makes no requirement of this.
-    - Iterators *should* implement this as `iter.return()`, dropping the return value
-    - Async iterators *should* implement this as `iter.return()`, dropping the returned promise's resolution value.
-    - The Observable proposal's `Subscription` should add this as an alias of `unsubscribe` and accept objects with this as an alias of `unsubscribe` for subscription-like objects
-    - Note: this should *not* be used to replace cancellation (like aborting an XHR) - only things that can conceptually be closed (like a stream or coroutine).
+// Get some rows from a database, using `try`/`finally`
+const connection = await db.connect()
 
-- `with value = resource` - Allocate a sync resource
-    - `value` is actually a pattern. Any assignment pattern works.
-    - It does *not* conflict with the legacy `with` statement, because patterns can't start with a left parenthesis.
-    - At the end of the block, each resource's `Symbol.close` method is invoked from last to first.
-    - In async contexts, all implicit `Symbol.close` method calls are awaited in parallel.
+try {
+    const rows = await connection.query("SELECT * FROM TABLE")
+    console.log(rows)
+} finally {
+    connection.close()
+}
 
-- Previously created resources are closed if later resources throw on creation
-    - This just falls out of the lexical computation order
+// Use a temp file
+const tmp = require("tmp-promise")
+const fs = require("fs/promises")
 
-- `Resource.wrap(init: (body: (value) => Promise<void>) => Promise<void>) -> Promise<AsyncResource & {value: T}>`
-    - Adapts an existing promise disposer callback to a resource.
-    - Similar to Promises with callback APIs.
-    - Sometimes, it's easier to use this method rather than specifying a `Symbol.close` method.
-    - Note: `body` is guaranteed never to throw, even if `init` throws.
+tmp.withFile(o => {
+    console.log('Doing work with the temp file', o.path)
+    await fs.writeFile(o.path, 'test', 'utf-8')
+}).then(() => {
+    console.log(`Temp file cleaned up!`)
+})
 
-- `Resource.join(iter)` is like `Promise.all`, but only accepts an `Array<() => AsyncResource>`.
-    - Thunks are required to detect sync errors when initializing async resources, to close those successfully created.
-    - Returns a promise to an array of resources with a `Symbol.close` method added to it.
+// Multiple parallel connections
+const Promise = require("bluebird")
+await using([
+    db.connect("db"),
+    db.connect("db"), // Let's hope this doesn't fail... ;-)
+], async ([conn1, conn2]) => {
+    // use conn1 and conn 2 here
+})
+```
 
-- `with` declarations create `const` bindings (to make it clear you can't change what's being closed)
+If so, it's pretty obvious this is all annoying boilerplate. What if, instead, it was like this?
 
-- It's block scoped, so it's easier to use multiple resources at once, even when they're dependent.
+```js
+// Get some rows from a database
+{
+    with connection = await db.connect()
+    const rows = await connection.query("SELECT * FROM TABLE")
+    console.log(rows)
+}
 
-- It's a lot simpler to compose multiple close methods than it is nested callbacks.
-    - Consider the `Resource.join` implementation below
-    - And trying to execute such callbacks in parallel isn't exactly trivial, as one of the helpers below shows
+// Use a temp file
+const tmp = require("tmp-promise")
+const fs = require("fs/promises")
 
-- It's easily optimized and trivially desugared (even by transpilers).
+{
+    with {path} = tmp.file()
+    console.log('Doing work with the temp file', o.path)
+    await fs.writeFile(o.path, 'test', 'utf-8')
+}
 
-- It's simple to understand and easy to explain.
+console.log(`Temp file cleaned up!`)
 
-- It's opinionated in favor of [RAII ("Resource Acquisition Is Initialization")](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization), but most JS APIs already follow that to some extent.
-    - Consider: promises, array buffers, DOM's newer APIs, Node's external APIs, etc.
+// Multiple parallel connections
+{
+    with [conn1, conn2] = await Promise.withAll([
+        () => db.connect(),
+        () => db.connect(),
+    ])
+    // use conn1 and conn 2 here
+}
+```
 
-- It's opinionated in favor of FIFO resource management, but this is already mandated by the promise disposer pattern.
+## Proposal
 
-- It avoids all the nesting issues and other functional confusion frequent with promise disposer patterns:
+So here's the basic context:
 
-    1. Simple creating a connection to use.
+- A resource is an object with a `Symbol.dispose` method. Anything with that method can be used as a resource.
 
-        ```js
-        // Promise disposer pattern
-        const rows = await getConnection(async connection => {
-            return connection.queryAsync("SELECT * FROM TABLE")
-        })
+- `value[Symbol.dispose]()` - This is how you explicitly clear a resource. There are several ways a potential resource could implement this:
+    - Built-in iterators and async iterators could implement this as an alias for `iter.return()`.
+    - Subscriptions could implement this as an alias for `unsubscribe`.
+    - Node streams could use this as an alias for `.destroy()` or `.close()`, as appropriate.
+    - It's obviously recommended that this be idempotent, although the spec makes no requirement of this.
 
-        console.log(rows);
+- `with value = resource` - This is how you create a resource. It's closed at the end of the block it's in, so you don't need to care about that.
+    - These are created as `const` variables, so they carry all the necessary restrictions with it. (This is to make it clearer what's being closed.)
+    - If there's multiple `with` statements, they are closed in the reverse order they were created.
+    - This doesn't actually conflict with the legacy `with` statement - patterns can't start with parentheses.
+    - In async contexts, all implicitly-called disposers are awaited in parallel, like via `Promise.all`.
+    - Resources are closed regardless of the completion type (it can be "normal", "throw", "return", or "break").
 
-        // This proposal
-        let rows = (async () => {
-            with connection = await getConnection()
-            return connection.queryAsync("SELECT * FROM TABLE");
-        })()
+- `Promise.withAll(factories: Iterable<() => resource>) -> Promise<[...values] & {[Symbol.close](): void}>` - This composes multiple async resources into an array of them, an array that also happens to have a `Symbol.dispose` method set on it. If creating any resource fails, all remaining ones are closed as necessary, and the first error propagated. (The rest are swallowed.)
+    - The main goal here is to open several resources in parallel and ensure they all close if one fails.
+    - This is analogous to Bluebird's [`Promise.using([...resources], ([...values]) => ...)`](http://bluebirdjs.com/docs/api/promise.using.html), so there's precedent. It's also hard to get right.
+    - Maybe, a method to aggregate exceptions might be nice for this + `Promise.all`?
 
-        console.log(rows)
-        ```
+- `Promise.wrap(init: (body: (...values) => Promise<void>) => Promise<any>) -> Promise<[...values] & {[Symbol.close](): Promise<void>}>`
+    - This exists to adapt a promise disposer to an async resource, much like the `Promise` constructor is used to adapt callbacks to promises.
+    - One could wrap an existing resource this way using an async function here with a `with` inside.
+    - This is exposed as a built-in, since it's non-trivial to implement (you're literally having to do a restricted form of `call/cc` to do it).
 
-    2. Using a temp file
+Intentionally, there is no equivalent to `Promise.withAll` and `Promise.wrap` for sync resources, since it's much more straightforward to implement them with simple objects, and trying to sugar over them with iterators is quite honestly overkill. For those, here's what an adapter would look like:
 
-        ```js
-        // Common stuff
-        const tmp = require("tmp");
-        const fs = require("fs");
-        const util = require("util")
+```js
+function wrapFoo(...args) {
+    const foo = getFoo(...args)
+    return {value: foo, [Symbol.close]: () => foo.close()}
+}
 
-        const exists = util.promisify(fs.exists)
-        const writeFile = util.promisify(fs.writeFile)
+async function wrapFooAsync(...args) {
+    const foo = await getFoo(...args)
+    return {value: foo, [Symbol.close]: () => foo.close()}
+}
+```
 
-        // Promise disposer pattern
-        async function withTempFile(opts, func) {
-            if (func == null) { func = opts; opts = undefined }
-            const [path, fd, cleanupCallback] = await new Promise((resolve, reject) => {
-                tmp.file(opts, (err, ...ret) =>
-                    err != null ? reject(err) : resolve(ret))
-            })
+## Why this way?
 
-            try {
-                return await func(path, fd)
-            } finally {
-                cleanupCallback()
-            }
-        }
+I know [this isn't the only proposal out there](https://github.com/rbuckton/proposal-using-statement), and many languages already use something like `using` or blocks:
 
-        ;(async () => {
-            let rememberPath
+- [Ruby uses blocks with `yield` + `ensure`](http://jakegoulding.com/blog/2012/10/01/using-ruby-blocks-to-ensure-resources-are-cleaned-up/)
+- [Java uses `try`-with-resources](https://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html)
+- [C# uses `using`](https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/keywords/using-statement)
+- [Python uses `with`](http://preshing.com/20110920/the-python-with-statement-by-example/)
+- The promise disposer pattern is basically Ruby's `yield` + `ensure`, just done with promises and a higher-order function instead.
 
-            try {
-                await withTempFile(async path => {
-                    console.log('Doing work with the temp file', path)
-                    await writeFile(path, 'test', 'utf-8')
-                    rememberPath = path
-                })
-            } finally {
-                console.log(`Temp file cleaned up: ${
-                    rememberPath != null && !await exists(rememberPath)
-                }`)
-            })
-        })()
+There's also the concept of "deferred" blocks:
 
-        // This proposal
-        function tmpFile(...args) {
-            return new Promise((resolve, reject) => {
-                tmp.file(...args, (err, path, fd, cleanupCallback) => {
-                    if (err != null) reject(err)
-                    else resolve({path, fd, [Symbol.close]: cleanupCallback})
-                })
-            })
-        }
+- Swift has [`defer` blocks](https://www.hackingwithswift.com/new-syntax-swift-2-defer).
+- Go has [`defer` statements](https://gobyexample.com/defer).
 
-        ;(async () => {
-            let rememberPath
+But here's why I chose this route:
 
-            try {
-                with {path} = await tmpFile()
-                console.log('Doing work with the temp file', path)
-                await writeFile(path, 'test', 'utf-8')
-                rememberPath = path
-            } finally {
-                console.log(`Temp file cleaned up: ${
-                    rememberPath != null && !await exists(rememberPath)
-                }`)
-            }
-        })()
-        ```
+- Most JS resources follow the concept of [RAII ("Resource Acquisition Is Initialization")](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization), both in the language (think: promises), in the DOM (think: recent constructor APIs), in Node (think: file handles), and in userspace (think: [`tmp`](https://www.npmjs.com/package/tmp)).
+    - [C++](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization#C++11_example) and [Rust](https://doc.rust-lang.org/rust-by-example/scope/raii.html) both use and *strongly* encourage RAII. Their resource management style is what this proposal was inspired by, and since they have to deal with resources and potential leaks heavily, and so they've had to sugar over them to make them easier to use. I mean, take a look at [their example for files](https://rustbyexample.com/std_misc/file/open.html) - it's almost like magic, but in a good way. C++ works pretty similarly for sockets and other file management - it's basically effortless.
+    - Resources should be easy to deal with, hence the simple replacement of a token.
 
-    3. Multiple parallel connections
+- You don't have to deal with the pyramid of doom when opening resources, even when they depend on other resources.
+    - Unlike the [`using` proposal](https://github.com/rbuckton/proposal-using-statement), you can even drop a `console.log` between opening two different resources.
+    - And it's *pretty obvious* that you could run into this issue in a hurry with Promises unless you're lucky enough to have a very non-trivial utility that can turn a `Iterable<(body: (value: T) => Promise<U>) => Promise<U>>` into a `(body: (value: [...T]) => Promise<U>) => Promise<U>` while handling all the edge cases that can arise from that (like timings).
 
-        ```js
-        // Promise disposer pattern
-        ;(async () => {
-            await using([getConnection, getConnection], async ([conn1, conn2]) => {
-                // use conn1 and conn 2 here
-            })
-            // Both connections closed by now
-        })()
+- Reusing an existing keyword is always nice, especially when it still remains meaningful. Python's use of `with` was another influence, and it made me feel it was a little more justified.
 
-        // This proposal
-        ;(async () => {
-            {
-                with [conn1, conn2] = await Object.useAll([
-                    () => getConnection(),
-                    () => getConnection(),
-                ])
-                // use conn1 and conn 2 here
-            }
-            // Both connections closed by now
-        })()
-        ```
+- Block scopes are nice for restricting scopes already. Why invent yet another concept, when we can just reuse what we have?
 
-    Helpers used for promise disposer variant:
+## Polyfills?
 
-    ```js
-    // `using`, analogous to `Promise.using` within Bluebird
-    async function using(cbs, func) {
-        // Start at 1 to avoid prematurely calling `func`
-        let state = {values: [], capabilities: [], remaining: 1}
-
-        async function cont() {
-            if (--state.remaining !== 0) return
-            const prev = state
-            state = undefined
-
-            try {
-                await func(prev.values)
-                for (const p of prev.capabilities) p.resolve()
-            } catch (e) {
-                for (const p of prev.capabilities) p.reject(e)
-            }
-        }
-
-        try {
-            const p = Promise.all(Array.from(callbacks, (callback, i) => {
-                if (state == null) return
-                state.remaining++
-                state.values[i] = undefined
-                let pair
-                const promise = new Promise((resolve, reject) => {
-                    pair = {resolve, reject}
-                })
-                return cb(value => {
-                    const p = pair
-                    if (p == null) return promise
-                    pair = undefined
-                    if (state == null) {
-                        p.resolve()
-                    } else {
-                        state.capabilities.push(p)
-                        state.values[i] = value
-                        cont()
-                    }
-                    return promise
-                })
-            }))
-
-            cont()
-            await p
-        } catch (e) {
-            const prev = state
-            state = undefined
-            for (const p of prev.capabilities) p.reject(e)
-            throw e
-        }
-    }
-    ```
-
-- Simple polyfill of new additions:
-
-    ```js
-    ;(function (global) {
-        "use strict"
-
-        global.Resource = global.Resource || {}
-
-        function newCapability() {
-            let resolve, reject
-            const promise = new Promise((res, rej) => { resolve = res; reject = rej })
-            return {resolve, reject, promise}
-        }
-
-        global.Resource.wrap = global.Resource.wrap || init => {
-            const wrap = newCapability()
-            const outer = newCapability()
-            const inner = newCapability()
-            const createResult = value => ({value, [Symbol.close]() {
-                inner.resolve()
-                return outer.promise
-            }})
-
-            outer.then(() => wrap.resolve(createResult()), wrap.reject)
-            try {
-                outer.resolve(init(value => {
-                    wrap.resolve(createResult(value))
-                    return inner.promise
-                }))
-            } catch (e) {
-                outer.reject(e)
-                wrap.reject(e)
-            }
-
-            return wrap.promise
-        }
-
-        global.Resource.join = global.Resource.join || async callbacks => {
-            let values = []
-
-            values[Symbol.close] = () => {
-                if (!Array.isArray(values)) return values
-                return values = Promise.all(
-                    values.map(async value => value[Symbol.close]())
-                    .filter(value => value != null && typeof value === "function")
-                )
-            }
-
-            try {
-                await Promise.all(Array.from(callbacks, async callback => {
-                    const value = await callback()
-                    if (Array.isArray(values)) values.push(value)
-                }))
-
-                return values
-            } catch (e) {
-                values[Symbol.close]()
-                throw e
-            }
-        }
-    })(
-        typeof window !== "undefined" ? window :
-        typeof global !== "undefined" ? global :
-        this
-    );
-    ```
-
-- Note: https://esdiscuss.org/topic/resource-management-eg-try-with-resources#content-2
-
-- TODO: explain how this compares to other languages
-    - [Java's `try`-with-resources](https://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html)
-    - [C#'s `using`](https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/keywords/using-statement)
-    - [Python's `with`](http://preshing.com/20110920/the-python-with-statement-by-example/)
-    - [Ruby's blocks (which with `begin`/`ensure` are used more or less exactly how the disposer pattern is used)](http://jakegoulding.com/blog/2012/10/01/using-ruby-blocks-to-ensure-resources-are-cleaned-up/)
-    - [C++'s](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization#C++11_example)/[Rust's](https://rustbyexample.com/std_misc/file/open.html) RAII (which this was inspired from)
+I don't have any polyfills ready yet, but I would like to eventually. This also includes syntax, so it'd also be pending a Babel parser plugin.
