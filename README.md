@@ -83,6 +83,8 @@ So here's the basic context:
 - `value[Symbol.dispose]()` - This is how you explicitly dispose of a resource. There are several ways a potential resource could implement this:
     - Built-in iterators and async iterators could implement this as an alias for `iter.return()`.
     - Subscriptions could implement this as an alias for `unsubscribe`.
+    - Array buffers could implement this to detach the array buffer. (This is useful if the buffer is large.)
+    - An object pool might use this to release an object back into the pool once it leaves the scope.
     - Other more complex scenarios like async temp files would need this to destroy the file before returning.
     - It's obviously recommended that this be idempotent, although the spec makes no requirement of this.
 
@@ -101,6 +103,11 @@ So here's the basic context:
     - In async contexts, it calls `value[Symbol.asyncDispose]()` if the method exists, but it falls back to `value[Symbol.dispose]()` if it doesn't.
     - In either case, the method is retrieved at the end of the block, so that's where the `TypeError` is thrown.
 
+- `Object.withIterable(iterable) -> Iterable & Iterator & {[Symbol.dispose](): void} | AsyncIterable & AsyncIterator & {[Symbol.asyncDispose](): Promise<void>` - Convert an iterable to a resource that auto-returns when you're done. For iterables implementing `Symbol.iterator`, this returns a sync iterator proxy that also implements `Symbol.dispose` as an alias for `return`. For iterables implementing `Symbol.asyncIterator`, this works similarly, just for async iterators and returning an async iterator proxy that also implements `Symbol.asyncDispose` as an alias for `return`. This is useful if you're building an iterable operator that's more complex than what a `for` loop with `yield` could handle.
+
+- `Promise.dispose(resource) -> Promise<void>` - This disposes of a resource explicitly.
+    - For most async resources, if you need to dispose of them, you should call this method instead of calling `resource[Symbol.asyncDispose]()` directly - the resource might instead implement `resource[Symbol.dispose]()`, and it might throw synchronously (which could cause bugs).
+
 - `Promise.withAll(factories: Iterable<() => Promise<asyncResource>>) -> Promise<[...values] & {[Symbol.asyncDispose](): void}>` - This creates and combines multiple async resources into an array of them, an array that also happens to have a `Symbol.asyncDispose` method set on it. If creating any resource fails, all remaining ones are closed as necessary, and the first error propagated. (The rest are swallowed.)
     - The main goal here is to open several resources in parallel and ensure they all close if one fails.
     - When `result[Symbol.asyncDispose]()` is called, this calls `value[Symbol.asyncDispose]()` for each resource if the method exists, but it falls back to `value[Symbol.dispose]()` if it doesn't. Also, all calls to `Symbol.asyncDispose` are awaited in parallel, like via `Promise.all`.
@@ -113,7 +120,7 @@ So here's the basic context:
     - One could wrap an existing resource this way using an async function here with a `with` inside.
     - This is exposed as a built-in, since it's non-trivial to implement (you're literally having to do a restricted form of `call/cc` to do it).
 
-Intentionally, there is no equivalent to `Promise.withAll` and `Promise.wrap` for sync resources. For `Promise.withAll`, the sync equivalent is just creating them with multiple `with` declarations - close-on-fail will just take care of itself naturally. For `Promise.wrap`, if you're dealing with a callback, JS doesn't have a "call with current continuation" primitive, so it's not possible to implement. If you're dealing with an object with an explicit disposer method, wrapping it is pretty trivial:
+Intentionally, there is no equivalent for any of the above utility methods for sync resources. For `Promise.dispose`, sync resources only have one possible symbol, `Symbol.dispose`, so you should prefer calling that over `Promise.dispose`. For `Promise.withAll`, the sync equivalent is just creating them with multiple `with` declarations - close-on-fail will just take care of itself naturally. For `Promise.wrap`, if you're dealing with a callback, JS doesn't have a "call with current continuation" primitive, so it's not possible to implement. If you're dealing with an object with an explicit disposer method, wrapping it is pretty trivial:
 
 ```js
 function wrapFoo(...args) {
@@ -144,9 +151,17 @@ There's also the concept of "deferred" blocks:
 
 But here's why I chose this route:
 
-- Most JS resources follow the concept of [RAII ("Resource Acquisition Is Initialization")](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization), both in the language (think: promises), in the DOM (think: recent constructor APIs), in Node (think: file handles), and in userspace (think: [`tmp`](https://www.npmjs.com/package/tmp)).
+- Resources should be easy to deal with, hence the simple replacement of a token.
+
+- In the language, iterators are already basically treated [RAII-style ("Resource Acquisition Is Initialization")](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization) in `for ... of` because of their `return` method call behavior, even though they aren't *technically* resource-like from a pragmatic perspective. This has been used by [Node.js streams](https://nodejs.org/api/stream.html#stream_readable_symbol_asynciterator) for async iteration, and [I've come up with a related abuse](https://esdiscuss.org/topic/resource-management) in something topically related to this.
+
+- RAII-style initialization with a keyword not implying the RHS is *conceptually* a resource makes it strictly easier and more flexible to work with. For example:
+    - Atomic and read/write locks would be easier to use - you just scope the lock normally using a `with` statement, and it gets released when you're done. The moral equivalent of Java's `synchronized` method type would become just a simple top-level mutex.
+    - You could make array buffers implement `Symbol.dispose` to detach the array buffer programmatically. This would make it easier to work with large temporary array buffers while making their lifetime explicit, so you're not pushing the assumption to the GC in potentially critial situations.
+    - In the DOM, most of IndexedDB stuff would make better sense as methods returning promises to RAII-like resources as appropriate (like for database transactions), rather than what it is now.
+    - In Node, if you're doing a lot of complex file system-related stuff with occasional interleaved computation and/or logging, it might be easier to avoid the nesting inherent with a `using` block and instead just use the file itself.
+    - One might implement an object pool or unique ID system via returning resources that when it's closed, the object/ID is reclaimed for later. This avoids the necessary explicit use+free situation you'd normally need otherwise.
     - [C++](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization#C++11_example) and [Rust](https://doc.rust-lang.org/rust-by-example/scope/raii.html) both use and *strongly* encourage RAII. Their resource management style is what this proposal was inspired by, and since they have to deal with resources and potential leaks heavily, and so they've had to sugar over them to make them easier to use. I mean, take a look at [their example for files](https://rustbyexample.com/std_misc/file/open.html) - it's almost like magic, but in a good way. C++ works pretty similarly for sockets and other file management - it's basically effortless.
-    - Resources should be easy to deal with, hence the simple replacement of a token.
 
 - You don't have to deal with the pyramid of doom when opening resources, even when they depend on other resources.
     - Unlike the [`using` proposal](https://github.com/rbuckton/proposal-using-statement), you can even drop a `console.log` between opening two different resources.
