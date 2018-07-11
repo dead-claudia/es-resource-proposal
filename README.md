@@ -99,6 +99,7 @@ So here's the basic context:
     - This doesn't actually conflict with the legacy `with` statement - patterns can't start with parentheses.
     - Resources are closed regardless of the completion type (it can be "normal", "throw", "return", or "break").
     - If an error occurs during closure, the first error to happen is propagated, but not until all resources within that block are closed (successfully or not).
+    - If `value` is `null` or `undefined`, nothing happens. This is to support things like `with res = getResource(); if (res == null) return false` or similar.
     - In sync contexts, it only calls `value[Symbol.dispose]()`.
     - In async contexts, it calls `value[Symbol.asyncDispose]()` if the method exists, but it falls back to `value[Symbol.dispose]()` if it doesn't.
     - In either case, the method is retrieved at the end of the block, so that's where the `TypeError` is thrown.
