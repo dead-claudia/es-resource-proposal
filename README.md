@@ -99,12 +99,12 @@ So here's the basic context:
     - If an error occurs during closure, the first error to happen is propagated, but not until all resources within that block are closed (successfully or not).
     - In sync contexts, it only calls `value[Symbol.dispose]()`.
     - In async contexts, it calls `value[Symbol.asyncDispose]()` if the method exists, but it falls back to `value[Symbol.dispose]()` if it doesn't.
-    - This gets the disposer method immediately and retains it until it needs to close the resource, so it can throw a `TypeError` at the creation site if it's missing either symbol.
+    - In either case, the method is retrieved at the end of the block, so that's where the `TypeError` is thrown.
 
 - `Promise.withAll(factories: Iterable<() => Promise<asyncResource>>) -> Promise<[...values] & {[Symbol.asyncDispose](): void}>` - This creates and combines multiple async resources into an array of them, an array that also happens to have a `Symbol.asyncDispose` method set on it. If creating any resource fails, all remaining ones are closed as necessary, and the first error propagated. (The rest are swallowed.)
     - The main goal here is to open several resources in parallel and ensure they all close if one fails.
     - When `result[Symbol.asyncDispose]()` is called, this calls `value[Symbol.asyncDispose]()` for each resource if the method exists, but it falls back to `value[Symbol.dispose]()` if it doesn't. Also, all calls to `Symbol.asyncDispose` are awaited in parallel, like via `Promise.all`.
-    - This gets the disposer method immediately for each resource and retains it until it needs to close it, so it can throw a `TypeError` immediately if it's missing either symbol.
+    - If, when closing, a resource lacks both `value[Symbol.dispose]()` and `value[Symbol.asyncDispose]()`, a `TypeError` is thrown. This doesn't block other resources, and it's as if there *was* a disposer method that just happened to throw the relevant `TypeError`.
     - This is analogous to Bluebird's [`Promise.using([...resources], ([...values]) => ...)`](http://bluebirdjs.com/docs/api/promise.using.html), so there's precedent. It's also hard to get right.
     - Maybe, a method to aggregate exceptions might be nice for this + `Promise.all`?
 
