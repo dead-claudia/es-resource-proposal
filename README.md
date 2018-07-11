@@ -80,40 +80,47 @@ So here's the basic context:
 
 - A resource is an object with a `Symbol.dispose` method. Anything with that method can be used as a resource.
 
-- `value[Symbol.dispose]()` - This is how you explicitly clear a resource. There are several ways a potential resource could implement this:
+- `value[Symbol.dispose]()` - This is how you explicitly dispose of a resource. There are several ways a potential resource could implement this:
     - Built-in iterators and async iterators could implement this as an alias for `iter.return()`.
     - Subscriptions could implement this as an alias for `unsubscribe`.
-    - Node streams could use this as an alias for `.destroy()` or `.close()`, as appropriate.
+    - Other more complex scenarios like async temp files would need this to destroy the file before returning.
     - It's obviously recommended that this be idempotent, although the spec makes no requirement of this.
+
+- `value[Symbol.asyncDispose]()` - This is how you explicitly dispose of an async resource.
+    - Built-in async iterators could implement this as an alias for `iter.return()`.
+    - Node streams could use this as an alias for `.destroy()` or `.close()`, as appropriate.
+    - Other more complex scenarios like async temp files would need this to destroy the file before returning.
 
 - `with value = resource` - This is how you create a resource. It's closed at the end of the block it's in, so you don't need to care about that.
     - These are created as `const` variables, so they carry all the necessary restrictions with it. (This is to make it clearer what's being closed.)
     - If there's multiple `with` statements, they are closed in the reverse order they were created.
     - This doesn't actually conflict with the legacy `with` statement - patterns can't start with parentheses.
-    - In async contexts, all implicitly-called disposers are awaited in parallel, like via `Promise.all`.
     - Resources are closed regardless of the completion type (it can be "normal", "throw", "return", or "break").
+    - If an error occurs during closure, the first error to happen is propagated, but not until all resources within that block are closed (successfully or not).
+    - In sync contexts, it only calls `value[Symbol.dispose]()`.
+    - In async contexts, it calls `value[Symbol.asyncDispose]()` if the method exists, but it falls back to `value[Symbol.dispose]()` if it doesn't. Also, all calls to `Symbol.asyncDispose` are awaited in parallel, like via `Promise.all`.
 
-- `Promise.withAll(factories: Iterable<() => resource>) -> Promise<[...values] & {[Symbol.close](): void}>` - This composes multiple async resources into an array of them, an array that also happens to have a `Symbol.dispose` method set on it. If creating any resource fails, all remaining ones are closed as necessary, and the first error propagated. (The rest are swallowed.)
+- `Promise.withAll(factories: Iterable<() => Promise<asyncResource>>) -> Promise<[...values] & {[Symbol.asyncDispose](): void}>` - This creates and combines multiple async resources into an array of them, an array that also happens to have a `Symbol.asyncDispose` method set on it. If creating any resource fails, all remaining ones are closed as necessary, and the first error propagated. (The rest are swallowed.)
     - The main goal here is to open several resources in parallel and ensure they all close if one fails.
     - This is analogous to Bluebird's [`Promise.using([...resources], ([...values]) => ...)`](http://bluebirdjs.com/docs/api/promise.using.html), so there's precedent. It's also hard to get right.
     - Maybe, a method to aggregate exceptions might be nice for this + `Promise.all`?
 
-- `Promise.wrap(init: (body: (...values) => Promise<void>) => Promise<any>) -> Promise<[...values] & {[Symbol.close](): Promise<void>}>`
+- `Promise.wrap(init: (body: (...values) => Promise<void>) => Promise<any>) -> Promise<[...values] & {[Symbol.asyncDispose](): Promise<void>}>`
     - This exists to adapt a promise disposer to an async resource, much like the `Promise` constructor is used to adapt callbacks to promises.
     - One could wrap an existing resource this way using an async function here with a `with` inside.
     - This is exposed as a built-in, since it's non-trivial to implement (you're literally having to do a restricted form of `call/cc` to do it).
 
-Intentionally, there is no equivalent to `Promise.withAll` and `Promise.wrap` for sync resources, since it's much more straightforward to implement them with simple objects, and trying to sugar over them with iterators is quite honestly overkill. For those, here's what an adapter would look like:
+Intentionally, there is no equivalent to `Promise.withAll` and `Promise.wrap` for sync resources. For `Promise.withAll`, the sync equivalent is just creating them with multiple `with` declarations - close-on-fail will just take care of itself naturally. For `Promise.wrap`, if you're dealing with a callback, JS doesn't have a "call with current continuation" primitive, so it's not possible to implement. If you're dealing with an object with an explicit disposer method, wrapping it is pretty trivial:
 
 ```js
 function wrapFoo(...args) {
     const foo = getFoo(...args)
-    return {value: foo, [Symbol.close]: () => foo.close()}
+    return {value: foo, [Symbol.dispose]: () => foo.close()}
 }
 
 async function wrapFooAsync(...args) {
     const foo = await getFoo(...args)
-    return {value: foo, [Symbol.close]: () => foo.close()}
+    return {value: foo, [Symbol.asyncDispose]: async () => foo.close()}
 }
 ```
 
