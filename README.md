@@ -198,7 +198,7 @@ This is how you consume a resource. It's closed at the end of the block it's in,
 - These are created using standard declarations, so they carry all the necessary restrictions with it.
 - If an error occurs during closure, the first error to happen is propagated, but not until all resources within that block are closed (successfully or not).
 - `using (let foo = one, bar = two) { ... }` is equivalent to `using (let foo = one) using (let bar = two) { ... }`
-- It calls `let handle = resource[Symbol.use]()`, sets the binding to `handle.value` while destructuring as appropriate, and then invokes `handle.close()` on the returned iterator after the block.
+- It calls `let handle = resource[Symbol.use]()`, sets the binding to `handle.value` while destructuring as appropriate, and then invokes `handle.close()` on the returned handle after the block.
 - If any resource or corresponding handle is `null`/`undefined`, it invokes the `else` block instead. This is to support things like `using (let res = getResource()) { ... } else { return false }` or similar, where a minor failure is easily tolerated and obvious from context.
     - If other resources were successfully created, they're closed *before* invoking the `else` block.
 - The `else` block is optional, but if you omit it, it defaults to throwing a `TypeError` instead of doing nothing, so obvious errors don't get swallowed.
@@ -303,7 +303,7 @@ There's also the concept of "deferred" blocks:
 
 And of course, there's [RAII ("Resource Acquisition Is Initialization")](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization), used by both [C++](https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization#C++11_example) and [Rust](https://doc.rust-lang.org/rust-by-example/scope/raii.html).
 
-But I chose to go a slightly different route and leverage iterators instead. [I've already found that you can abuse `for ... of` for this](https://esdiscuss.org/topic/resource-management), but it doesn't exactly provide a proper resource management solution, and the little it *does* provide doesn't quite account for all the edge cases you'd need to address. But suspendable generators *do* make for a good abstraction of resources, and here's why:
+But I chose to go a slightly different route and separate acquisition and release instead, operating on handles rather than the values directly. [I've already found that you can abuse generators and `for ... of` for this](https://esdiscuss.org/topic/resource-management), but it doesn't exactly provide a proper resource management solution, and the little it *does* provide doesn't quite account for all the edge cases you'd need to address.
 
 - In Java and similar, it's *very* common to close a resource in the last part of a `try ... finally` statement. This got *so* common that Java's `try`-with-resources and C#'s `using` were both added to sugar over this very idiom. Here's an example [derived from their tutorial documentation](https://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html):
 
@@ -320,8 +320,7 @@ But I chose to go a slightly different route and leverage iterators instead. [I'
 
     // Java 7
     static String readFirstLineFromFile(String path) throws IOException {
-        // FIXME: remove this trailing semicolon here (it breaks editor highlighting).
-        try (BufferedReader br = new BufferedReader(new FileReader(path));) {
+        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
             return br.readLine();
         }
     }
@@ -347,6 +346,8 @@ But I chose to go a slightly different route and leverage iterators instead. [I'
         # do things
     end
     ```
+
+- It's idiomatic in RAII situations to have separate acquire/release steps, and that decoupling makes it more flexible while still retaining *some* memory safety. With this proposal, you can have things like `using (const object = somePool) { ... }` and it just works. By also separating the acquire/release steps, it also prevents certain very obviously absurd things, like ["releasing" locks that weren't acquired in the first place](https://www.youtube.com/watch?v=IcgmSRJHu_8).
 
 ## Polyfills?
 
