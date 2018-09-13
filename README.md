@@ -156,17 +156,9 @@ const throwError = err => { throw err }
 
 ChildProcess.prototype[Symbol.use] = function () {
     // Private method used here for more sane resource management.
-    const hasRef = this._handle.hasRef()
-    if (!hasRef) this.ref()
-    return {value: this, close: () => {
-        if (!hasRef) this.unref()
-        this.prependOnceListener("error", throwError)
-        try {
-            this.kill("SIGTERM")
-        } finally {
-            this.removeListener("error", throwError)
-        }
-    }}
+    if (this._handle.hasRef()) return {value: this, close() {}}
+    this.ref()
+    return {value: this, close: () => this.unref()}
 }
 ```
 
